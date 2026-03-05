@@ -1,0 +1,333 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ollama Chatbot — Llama 3.2</title>
+    <meta name="description" content="AI-powered chatbot built with Django and Ollama Llama 3.2">
+    <link rel="stylesheet" href="{% static 'chatbot/styles.css' %}">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦙</text></svg>">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Overlay (mobile) -->
+        <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-brand">
+                    <div class="brand-icon">🦙</div>
+                    <span class="brand-text">Llama Chat</span>
+                </div>
+                <button class="new-chat-btn" onclick="createNewChat()" id="newChatBtn">
+                    <span class="icon">+</span>
+                    New Chat
+                </button>
+            </div>
+
+            <div class="session-list" id="sessionList">
+                {% for s in sessions %}
+                <div class="session-item {% if s.session_id == session.session_id %}active{% endif %}"
+                     data-session-id="{{ s.session_id }}"
+                     onclick="switchSession('{{ s.session_id }}')">
+                    <span class="session-title">{{ s.title }}</span>
+                    <button class="session-delete"
+                            onclick="event.stopPropagation(); deleteSession('{{ s.session_id }}')"
+                            title="Delete chat">✕</button>
+                </div>
+                {% endfor %}
+            </div>
+
+            <div class="sidebar-footer">
+                <div class="model-badge">
+                    <span class="model-dot"></span>
+                    <span>llama3.2 via Ollama</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="chat-main">
+            <header class="chat-header">
+                <button class="menu-toggle" onclick="toggleSidebar()" aria-label="Toggle menu">☰</button>
+                <h1 class="chat-header-title" id="chatTitle">{{ session.title }}</h1>
+                <div class="header-actions"></div>
+            </header>
+
+            <div class="messages-container" id="messagesContainer">
+                {% if messages %}
+                    {% for msg in messages %}
+                    <div class="message {{ msg.role }}">
+                        <div class="message-avatar">
+                            {% if msg.role == 'user' %}👤{% else %}🦙{% endif %}
+                        </div>
+                        <div class="message-content">
+                            <div class="message-role">{{ msg.role }}</div>
+                            <div class="message-text">
+                                {% if msg.role == 'assistant' %}
+                                    <div class="markdown-body">{{ msg.content }}</div>
+                                {% else %}
+                                    {{ msg.content }}
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="welcome-screen" id="welcomeScreen">
+                        <div class="welcome-icon">🦙</div>
+                        <h2 class="welcome-title">Welcome to Llama Chat</h2>
+                        <p class="welcome-subtitle">
+                            Powered by Ollama &amp; Llama 3.2. Ask me anything — I'm running locally on your machine.
+                        </p>
+                        <div class="suggestions">
+                            <button class="suggestion-card" onclick="useSuggestion(this)">
+                                <span class="suggestion-icon">💡</span>
+                                Explain quantum computing in simple terms
+                            </button>
+                            <button class="suggestion-card" onclick="useSuggestion(this)">
+                                <span class="suggestion-icon">🐍</span>
+                                Write a Python function to find prime numbers
+                            </button>
+                            <button class="suggestion-card" onclick="useSuggestion(this)">
+                                <span class="suggestion-icon">📝</span>
+                                Help me write a professional email
+                            </button>
+                            <button class="suggestion-card" onclick="useSuggestion(this)">
+                                <span class="suggestion-icon">🎨</span>
+                                Suggest a color palette for a tech startup
+                            </button>
+                        </div>
+                    </div>
+                {% endif %}
+
+                <!-- Typing Indicator -->
+                <div class="typing-indicator" id="typingIndicator">
+                    <div class="message-avatar" style="background: var(--bg-tertiary); border: 1px solid var(--border-color);">🦙</div>
+                    <div class="typing-dots">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <div class="input-wrapper">
+                    <textarea
+                        id="message-input"
+                        placeholder="Type your message..."
+                        rows="1"
+                        autofocus
+                    ></textarea>
+                    <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send message">
+                        ➤
+                    </button>
+                </div>
+                <div class="input-hint">
+                    Press <strong>Enter</strong> to send · <strong>Shift+Enter</strong> for new line
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Marked.js for Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+    <script>
+        // ---- State ----
+        const CSRF_TOKEN = '{{ csrf_token }}';
+        let currentSessionId = '{{ session.session_id }}';
+        let isWaiting = false;
+
+        // ---- DOM Elements ----
+        const messagesContainer = document.getElementById('messagesContainer');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('sendBtn');
+        const typingIndicator = document.getElementById('typingIndicator');
+        const chatTitle = document.getElementById('chatTitle');
+        const welcomeScreen = document.getElementById('welcomeScreen');
+
+        // ---- Init ----
+        document.addEventListener('DOMContentLoaded', () => {
+            scrollToBottom();
+            autoResizeTextarea();
+            renderExistingMarkdown();
+        });
+
+        // ---- Markdown Rendering ----
+        function renderExistingMarkdown() {
+            document.querySelectorAll('.markdown-body').forEach(el => {
+                el.innerHTML = marked.parse(el.textContent);
+            });
+        }
+
+        // ---- Auto-resize Textarea ----
+        function autoResizeTextarea() {
+            messageInput.addEventListener('input', () => {
+                messageInput.style.height = 'auto';
+                messageInput.style.height = Math.min(messageInput.scrollHeight, 150) + 'px';
+            });
+        }
+
+        // ---- Keyboard Shortcuts ----
+        messageInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // ---- Send Message ----
+        async function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message || isWaiting) return;
+
+            // Remove welcome screen
+            if (welcomeScreen) welcomeScreen.remove();
+
+            // Add user message to UI
+            appendMessage('user', message);
+
+            // Clear input
+            messageInput.value = '';
+            messageInput.style.height = 'auto';
+
+            // Show typing indicator
+            isWaiting = true;
+            sendBtn.disabled = true;
+            typingIndicator.classList.add('visible');
+            scrollToBottom();
+
+            try {
+                const response = await fetch('/chatbot/send/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': CSRF_TOKEN,
+                    },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: currentSessionId,
+                    }),
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    appendMessage('assistant', data.response, true);
+                    if (data.session_title) {
+                        chatTitle.textContent = data.session_title;
+                        updateSessionTitle(currentSessionId, data.session_title);
+                    }
+                } else {
+                    appendMessage('assistant', `⚠️ Error: ${data.error}`, true);
+                }
+            } catch (error) {
+                appendMessage('assistant', `⚠️ Network error: ${error.message}`, true);
+            } finally {
+                typingIndicator.classList.remove('visible');
+                isWaiting = false;
+                sendBtn.disabled = false;
+                messageInput.focus();
+                scrollToBottom();
+            }
+        }
+
+        // ---- Append Message to UI ----
+        function appendMessage(role, content, isMarkdown = false) {
+            const avatar = role === 'user' ? '👤' : '🦙';
+            const textContent = isMarkdown ? marked.parse(content) : escapeHtml(content);
+
+            const html = `
+                <div class="message ${role}">
+                    <div class="message-avatar">${avatar}</div>
+                    <div class="message-content">
+                        <div class="message-role">${role}</div>
+                        <div class="message-text">${textContent}</div>
+                    </div>
+                </div>
+            `;
+
+            typingIndicator.insertAdjacentHTML('beforebegin', html);
+            scrollToBottom();
+        }
+
+        // ---- Utility: Escape HTML ----
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // ---- Scroll to Bottom ----
+        function scrollToBottom() {
+            requestAnimationFrame(() => {
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            });
+        }
+
+        // ---- Suggestion Cards ----
+        function useSuggestion(card) {
+            const text = card.textContent.trim().replace(/^[^\s]+\s/, '');
+            messageInput.value = text;
+            messageInput.focus();
+            sendMessage();
+        }
+
+        // ---- Sidebar: Create New Chat ----
+        async function createNewChat() {
+            try {
+                const response = await fetch('/chatbot/new/', {
+                    method: 'GET',
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                });
+                const data = await response.json();
+                window.location.href = `/chatbot/session/${data.session_id}/`;
+            } catch (error) {
+                console.error('Failed to create new chat:', error);
+            }
+        }
+
+        // ---- Sidebar: Switch Session ----
+        function switchSession(sessionId) {
+            window.location.href = `/chatbot/session/${sessionId}/`;
+        }
+
+        // ---- Sidebar: Delete Session ----
+        async function deleteSession(sessionId) {
+            if (!confirm('Delete this chat?')) return;
+
+            try {
+                await fetch(`/chatbot/session/${sessionId}/delete/`, {
+                    method: 'POST',
+                    headers: { 'X-CSRFToken': CSRF_TOKEN },
+                });
+
+                if (sessionId === currentSessionId) {
+                    window.location.href = '/chatbot/';
+                } else {
+                    const item = document.querySelector(`[data-session-id="${sessionId}"]`);
+                    if (item) item.remove();
+                }
+            } catch (error) {
+                console.error('Failed to delete session:', error);
+            }
+        }
+
+        // ---- Update Session Title in Sidebar ----
+        function updateSessionTitle(sessionId, title) {
+            const item = document.querySelector(`[data-session-id="${sessionId}"] .session-title`);
+            if (item) item.textContent = title;
+        }
+
+        // ---- Toggle Sidebar (Mobile) ----
+        function toggleSidebar() {
+            document.getElementById('sidebar').classList.toggle('open');
+            document.getElementById('sidebarOverlay').classList.toggle('visible');
+        }
+    </script>
+</body>
+</html>
